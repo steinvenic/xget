@@ -366,7 +366,10 @@ async function handleRequest(request, env, ctx) {
             pathParts.splice(2, 0, 'library');
             // Return redirect response instead of modifying the path
             const redirectUrl = new URL(url);
-            redirectUrl.pathname = pathParts.join('/');
+            // Use the original path with the library prefix added
+            const originalPathParts = effectivePath.split('/');
+            originalPathParts.splice(3, 0, 'library');
+            redirectUrl.pathname = originalPathParts.join('/');
             return Response.redirect(redirectUrl, 301);
           }
         }
@@ -382,7 +385,9 @@ async function handleRequest(request, env, ctx) {
 
     // Handle Docker authentication
     if (isDocker && url.pathname === '/v2/auth') {
-      const newUrl = new URL(config.PLATFORMS[platform] + '/v2/');
+      // For Docker authentication, we need to fetch the token from the upstream registry
+      const upstreamUrl = config.PLATFORMS[platform];
+      const newUrl = new URL(upstreamUrl + '/v2/');
       const resp = await fetch(newUrl.toString(), {
         method: 'GET',
         redirect: 'follow'
@@ -638,16 +643,12 @@ async function handleRequest(request, env, ctx) {
 
     // If response is still not ok after all retries, return the error
     if (!response.ok && response.status !== 206) {
-      // For Docker authentication errors that we couldn't resolve with anonymous tokens,
-      // return a more helpful error message
+      // For Docker authentication errors, return the 401 response with proper WWW-Authenticate header
+      // This allows the Docker client to handle authentication properly
       if (isDocker && response.status === 401) {
-        const errorText = await response.text().catch(() => '');
-        return createErrorResponse(
-          `Authentication required for this container registry resource. This may be a private repository. Original error: ${errorText}`,
-          401,
-          true
-        );
+        return responseUnauthorized(url);
       }
+      
       const errorText = await response.text().catch(() => 'Unknown error');
       return createErrorResponse(
         `Upstream server error (${response.status}): ${errorText}`,
