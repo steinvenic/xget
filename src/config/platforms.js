@@ -70,7 +70,6 @@ export const PLATFORMS = {
   'ip-hyperbolic': 'https://api.hyperbolic.xyz',
 
   // Container Registries
-  'cr-dockerhub': 'https://registry-1.docker.io',
   'cr-quay': 'https://quay.io',
   'cr-gcr': 'https://gcr.io',
   'cr-mcr': 'https://mcr.microsoft.com',
@@ -86,7 +85,9 @@ export const PLATFORMS = {
   'cr-heroku': 'https://registry.heroku.com',
   'cr-suse': 'https://registry.suse.com',
   'cr-opensuse': 'https://registry.opensuse.org',
-  'cr-gitpod': 'https://registry.gitpod.io'
+  'cr-gitpod': 'https://registry.gitpod.io',
+  // 添加 DockerHub 支持
+  'cr-dockerhub': 'https://registry-1.docker.io'
 };
 
 /**
@@ -154,30 +155,6 @@ export function transformPath(path, platformKey) {
       // /brew -> /brew
       // /homebrew-core -> /homebrew-core
       // /homebrew-cask -> /homebrew-cask
-      return transformedPath;
-    }
-  }
-
-  // Special handling for Docker Hub
-  if (platformKey === 'cr-dockerhub') {
-    // Transform paths for Docker Hub registry
-    if (transformedPath.startsWith('/')) {
-      // Handle Docker Hub specific path transformations:
-      // Official images: /library/ubuntu -> /v2/library/ubuntu
-      // User images: /user/repo -> /v2/user/repo
-      // Already v2 API paths are kept as-is
-      if (!transformedPath.startsWith('/v2/')) {
-        // For Docker Hub, we need to handle official images specially
-        // Official images (single name like 'ubuntu', 'nginx') should use 'library/' prefix
-        const pathParts = transformedPath.split('/').filter(p => p);
-        if (pathParts.length === 1) {
-          // Official image: ubuntu -> /v2/library/ubuntu
-          transformedPath = `/v2/library/${pathParts[0]}`;
-        } else {
-          // User image: user/repo -> /v2/user/repo
-          transformedPath = `/v2${transformedPath}`;
-        }
-      }
       return transformedPath;
     }
   }
