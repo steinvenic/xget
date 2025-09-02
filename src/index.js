@@ -354,13 +354,20 @@ async function handleRequest(request, env, ctx) {
     let finalTargetPath;
     let isDockerHub = platform === 'cr-dockerhub';
     if (platform.startsWith('cr-')) {
+      // For container registries, we want to keep the path as-is after removing the platform prefix
+      // But we need to ensure the path starts with /v2/ for Docker API compatibility
+      if (!targetPath.startsWith('/v2/')) {
+        targetPath = '/v2' + targetPath;
+      }
+      
       // Special handling for DockerHub library images - redirect for DockerHub library images
-      // Example: /cr/dockerhub/v2/busybox/manifests/latest => /cr/dockerhub/v2/library/busybox/manifests/latest
+      // Example: /cr/dockerhub/v2/nginx/manifests/latest => /cr/dockerhub/v2/library/nginx/manifests/latest
       if (isDockerHub) {
         const pathParts = targetPath.split('/');
         // Check if we need to add library prefix for DockerHub
         // Path format: /v2/[image]/manifests/[tag] or /v2/[image]/blobs/[digest]
-        if (pathParts.length == 5) { // /v2/[image]/manifests/[tag] or /v2/[image]/blobs/[digest]
+        if (pathParts.length >= 5 && pathParts[1] === 'v2' && 
+            (pathParts[3] === 'manifests' || pathParts[3] === 'blobs')) {
           // Add 'library' prefix if not already present and not a multi-segment name
           if (!pathParts[2].includes('/') && !pathParts[2].startsWith('library/')) {
             pathParts.splice(2, 0, 'library');
@@ -443,8 +450,7 @@ async function handleRequest(request, env, ctx) {
     const fetchOptions = {
       method: request.method,
       headers: new Headers(),
-      // don't follow redirect to dockerhub blob upstream
-      redirect: isDocker && platform === 'cr-dockerhub' ? 'manual' : 'follow'
+      redirect: 'follow'
     };
 
     // Add body for POST/PUT/PATCH requests (Git/Docker/AI inference operations)
