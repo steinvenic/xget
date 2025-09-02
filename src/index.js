@@ -347,23 +347,26 @@ async function handleRequest(request, env, ctx) {
     let finalTargetPath;
     let isDockerHub = platform === 'cr-dockerhub';
     if (platform.startsWith('cr-')) {
-      // Special handling for DockerHub library images
+      // Special handling for DockerHub library images - redirect for DockerHub library images
       // Example: /cr/dockerhub/v2/busybox/manifests/latest => /cr/dockerhub/v2/library/busybox/manifests/latest
       if (isDockerHub) {
-        // Check if targetPath already starts with /v2, if not add it
-        if (!targetPath.startsWith('/v2')) {
-          targetPath = '/v2' + targetPath;
+        const pathParts = targetPath.split('/');
+        // Check if we need to add library prefix for DockerHub
+        // Path format: /v2/[image]/manifests/[tag] or /v2/[image]/blobs/[digest]
+        if (pathParts.length == 5) {
+          // Add 'library' prefix if not already present and not a multi-segment name
+          if (!pathParts[2].includes('/') && !pathParts[2].startsWith('library/')) {
+            pathParts.splice(2, 0, 'library');
+            // Return redirect response instead of modifying the path
+            const redirectUrl = new URL(url);
+            redirectUrl.pathname = pathParts.join('/');
+            return Response.redirect(redirectUrl, 301);
+          }
         }
         
-        const pathParts = targetPath.split('/').filter(part => part !== '');
-        // Check if we need to add library prefix for DockerHub
-        // Path format: v2/[image]/manifests/[tag] or v2/[image]/blobs/[digest]
-        if (pathParts.length >= 3) {
-          // Add 'library' prefix if not already present and not a multi-segment name
-          if (!pathParts[1].includes('/') && !pathParts[1].startsWith('library/')) {
-            pathParts.splice(1, 0, 'library');
-            targetPath = '/v2/' + pathParts.slice(1).join('/');
-          }
+        // Ensure /v2 prefix
+        if (!targetPath.startsWith('/v2')) {
+          targetPath = '/v2' + targetPath;
         }
       } else {
         // For other container registries, ensure /v2 prefix
@@ -406,7 +409,7 @@ async function handleRequest(request, env, ctx) {
         }
       }
       
-      return await fetchToken(wwwAuthenticate, scope || '', authorization || '');
+      return await fetchToken(wwwAuthenticate, scope, authorization);
     }
 
     // Check if this is a Git operation
