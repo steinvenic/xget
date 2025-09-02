@@ -44,11 +44,6 @@ function isDockerRequest(request, url) {
   if (url.pathname.startsWith('/v2/')) {
     return true;
   }
-  
-  // Check for container registry paths with /cr/ prefix
-  if (url.pathname.startsWith('/cr/')) {
-    return true;
-  }
 
   // Check for Docker-specific User-Agent
   const userAgent = request.headers.get('User-Agent') || '';
@@ -237,8 +232,8 @@ function parseAuthenticate(authenticateStr) {
 /**
  * Fetches authentication token from container registry
  * @param {{realm: string, service: string}} wwwAuthenticate - Authentication info
- * @param {string | null | undefined} scope - The scope for the token
- * @param {string | null | undefined} authorization - Authorization header value
+ * @param {string} scope - The scope for the token
+ * @param {string} authorization - Authorization header value
  * @returns {Promise<Response>} Token response
  */
 async function fetchToken(wwwAuthenticate, scope, authorization) {
@@ -263,15 +258,10 @@ async function fetchToken(wwwAuthenticate, scope, authorization) {
  */
 function responseUnauthorized(url) {
   const headers = new Headers();
-
-  headers.set(
-    'Www-Authenticate',
-    `Bearer realm="https://${url.hostname}/v2/auth",service="cloudflare-docker-proxy"`
-  );
-
+  headers.set('WWW-Authenticate', `Bearer realm="https://${url.hostname}/v2/auth",service="Xget"`);
   return new Response(JSON.stringify({ message: 'UNAUTHORIZED' }), {
     status: 401,
-    headers: headers,
+    headers: headers
   });
 }
 
@@ -348,41 +338,12 @@ async function handleRequest(request, env, ctx) {
     }
 
     // Transform URL based on platform using unified logic
-    let targetPath = transformPath(effectivePath, platform);
+    const targetPath = transformPath(effectivePath, platform);
 
-    // For container registries, ensure we add the /v2 prefix for the Docker API if needed
+    // For container registries, ensure we add the /v2 prefix for the Docker API
     let finalTargetPath;
-    let isDockerHub = platform === 'cr-dockerhub';
     if (platform.startsWith('cr-')) {
-      // For container registries, we want to keep the path as-is after removing the platform prefix
-      // But we need to ensure the path starts with /v2/ for Docker API compatibility
-      if (!targetPath.startsWith('/v2/')) {
-        targetPath = '/v2' + targetPath;
-      }
-      
-      // Special handling for DockerHub library images - redirect for DockerHub library images
-      // Example: /cr/dockerhub/v2/nginx/manifests/latest => /cr/dockerhub/v2/library/nginx/manifests/latest
-      if (isDockerHub) {
-        const pathParts = targetPath.split('/');
-        // Check if we need to add library prefix for DockerHub
-        // Path format: /v2/[image]/manifests/[tag] or /v2/[image]/blobs/[digest]
-        if (pathParts.length >= 5 && pathParts[1] === 'v2' && 
-            (pathParts[3] === 'manifests' || pathParts[3] === 'blobs')) {
-          // Add 'library' prefix if not already present and not a multi-segment name
-          if (!pathParts[2].includes('/') && !pathParts[2].startsWith('library/')) {
-            pathParts.splice(2, 0, 'library');
-            // Return redirect response instead of modifying the path
-            const redirectUrl = new URL(url);
-            // Use the original path with the library prefix added
-            const originalPathParts = effectivePath.split('/');
-            originalPathParts.splice(3, 0, 'library');
-            redirectUrl.pathname = originalPathParts.join('/');
-            return Response.redirect(redirectUrl, 301);
-          }
-        }
-      }
-      
-      finalTargetPath = targetPath;
+      finalTargetPath = `/v2${targetPath}`;
     } else {
       finalTargetPath = targetPath;
     }
@@ -390,11 +351,23 @@ async function handleRequest(request, env, ctx) {
     const targetUrl = `${config.PLATFORMS[platform]}${finalTargetPath}${url.search}`;
     const authorization = request.headers.get('Authorization');
 
+    // Special DockerHub library image redirection (before authentication)
+    if (platform === 'cr-dockerhub' && isDocker) {
+      const pathParts = url.pathname.split('/');
+      // Handle redirect for DockerHub library images
+      // Example: /cr/dockerhub/v2/busybox/manifests/latest => /cr/dockerhub/v2/library/busybox/manifests/latest
+      if (pathParts.length === 6 && pathParts[3] && !pathParts[3].includes('/')) {
+        // This is a library image request, redirect to include library namespace
+        pathParts.splice(3, 0, 'library');
+        const redirectUrl = new URL(url);
+        redirectUrl.pathname = pathParts.join('/');
+        return Response.redirect(redirectUrl, 301);
+      }
+    }
+
     // Handle Docker authentication
     if (isDocker && url.pathname === '/v2/auth') {
-      // For Docker authentication, we need to fetch the token from the upstream registry
-      const upstreamUrl = config.PLATFORMS[platform];
-      const newUrl = new URL(upstreamUrl + '/v2/');
+      const newUrl = new URL(config.PLATFORMS[platform] + '/v2/');
       const resp = await fetch(newUrl.toString(), {
         method: 'GET',
         redirect: 'follow'
@@ -409,20 +382,18 @@ async function handleRequest(request, env, ctx) {
       const wwwAuthenticate = parseAuthenticate(authenticateStr);
       let scope = url.searchParams.get('scope');
       
-      // Special handling for DockerHub scope autocomplete
-      // autocomplete repo part into scope for DockerHub library images
-      // Example: repository:busybox:pull => repository:library/busybox:pull
+      // Special handling for DockerHub library images in scope
       if (platform === 'cr-dockerhub' && scope) {
         let scopeParts = scope.split(':');
-        if (scopeParts.length == 3 && !scopeParts[1].includes('/')) {
+        if (scopeParts.length === 3 && !scopeParts[1].includes('/')) {
+          // Autocomplete repo part into scope for DockerHub library images
+          // Example: repository:busybox:pull => repository:library/busybox:pull
           scopeParts[1] = 'library/' + scopeParts[1];
           scope = scopeParts.join(':');
         }
       }
       
-      // Handle authorization header
-      const authHeader = authorization ? authorization : '';
-      return await fetchToken(wwwAuthenticate, scope, authHeader);
+      return await fetchToken(wwwAuthenticate, scope || '', authorization || '');
     }
 
     // Check if this is a Git operation
@@ -503,11 +474,6 @@ async function handleRequest(request, env, ctx) {
           requestHeaders.set('User-Agent', 'Xget-AI-Proxy/1.0');
         }
       }
-      
-      // For DockerHub requests, don't follow redirects automatically for blob requests
-      if (isDocker && platform === 'cr-dockerhub') {
-        fetchOptions.redirect = 'manual';
-      }
     } else {
       // Regular file download headers
       Object.assign(fetchOptions, {
@@ -562,7 +528,7 @@ async function handleRequest(request, env, ctx) {
             const getResponse = await fetch(targetUrl, {
               ...finalFetchOptions,
               method: 'GET'
-              });
+            });
 
             if (getResponse.ok) {
               // Create a new response with HEAD method but include Content-Length from GET
@@ -595,22 +561,82 @@ async function handleRequest(request, env, ctx) {
           break;
         }
 
-        // Handle DockerHub blob redirect manually
-        if (isDocker && platform === 'cr-dockerhub' && response.status === 307) {
+        // Handle DockerHub blob redirect manually (similar to good-worker.js)
+        if (platform === 'cr-dockerhub' && response.status === 307) {
           const location = response.headers.get('Location');
           if (location) {
             const redirectResp = await fetch(location, {
               method: 'GET',
-              redirect: 'follow',
+              redirect: 'follow'
             });
-            return redirectResp;
+            response = redirectResp;
+            if (response.ok) {
+              monitor.mark('success');
+              break;
+            }
           }
         }
 
         // For container registry, handle authentication challenges more intelligently
         if (isDocker && response.status === 401) {
-          // For container registries, return the 401 response with proper WWW-Authenticate header
-          // This allows the Docker client to handle authentication properly
+          monitor.mark('docker_auth_challenge');
+
+          // For container registries, first check if we can get a token without credentials
+          // This allows access to public repositories
+          const authenticateStr = response.headers.get('WWW-Authenticate');
+          if (authenticateStr) {
+            try {
+              const wwwAuthenticate = parseAuthenticate(authenticateStr);
+
+              // Infer scope from the request path for container registry requests
+              let scope = '';
+              const pathParts = url.pathname.split('/');
+              if (pathParts.length >= 4 && pathParts[1] === 'v2') {
+                // Extract repository name from path like /v2/cr/ghcr/nginxinc/nginx-unprivileged/manifests/latest
+                // Remove /v2 and platform prefix to get the repo path
+                const repoPath = pathParts.slice(4).join('/'); // Skip /v2/cr/[registry]
+                const repoParts = repoPath.split('/');
+                if (repoParts.length >= 1) {
+                  const repoName = repoParts.slice(0, -2).join('/'); // Remove /manifests/tag or /blobs/sha
+                  if (repoName) {
+                    scope = `repository:${repoName}:pull`;
+                    
+                    // Special handling for DockerHub library images in scope
+                    if (platform === 'cr-dockerhub' && !repoName.includes('/')) {
+                      scope = `repository:library/${repoName}:pull`;
+                    }
+                  }
+                }
+              }
+
+              // Try to get a token for public access (without authorization)
+              const tokenResponse = await fetchToken(wwwAuthenticate, scope || '', '');
+              if (tokenResponse.ok) {
+                const tokenData = await tokenResponse.json();
+                if (tokenData.token) {
+                  // Retry the original request with the obtained token
+                  const retryHeaders = new Headers(requestHeaders);
+                  retryHeaders.set('Authorization', `Bearer ${tokenData.token}`);
+
+                  const retryResponse = await fetch(targetUrl, {
+                    ...finalFetchOptions,
+                    headers: retryHeaders
+                  });
+
+                  if (retryResponse.ok) {
+                    response = retryResponse;
+                    monitor.mark('success');
+                    break;
+                  }
+                }
+              }
+            } catch (error) {
+              console.log('Token fetch failed:', error);
+            }
+          }
+
+          // If token fetch failed or didn't work, return the unauthorized response
+          // Only return this if we truly can't access the resource
           return responseUnauthorized(url);
         }
 
@@ -649,12 +675,16 @@ async function handleRequest(request, env, ctx) {
 
     // If response is still not ok after all retries, return the error
     if (!response.ok && response.status !== 206) {
-      // For Docker authentication errors, return the 401 response with proper WWW-Authenticate header
-      // This allows the Docker client to handle authentication properly
+      // For Docker authentication errors that we couldn't resolve with anonymous tokens,
+      // return a more helpful error message
       if (isDocker && response.status === 401) {
-        return responseUnauthorized(url);
+        const errorText = await response.text().catch(() => '');
+        return createErrorResponse(
+          `Authentication required for this container registry resource. This may be a private repository. Original error: ${errorText}`,
+          401,
+          true
+        );
       }
-      
       const errorText = await response.text().catch(() => 'Unknown error');
       return createErrorResponse(
         `Upstream server error (${response.status}): ${errorText}`,
