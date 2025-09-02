@@ -70,6 +70,7 @@ export const PLATFORMS = {
   'ip-hyperbolic': 'https://api.hyperbolic.xyz',
 
   // Container Registries
+  'cr-dockerhub': 'https://registry-1.docker.io',
   'cr-quay': 'https://quay.io',
   'cr-gcr': 'https://gcr.io',
   'cr-mcr': 'https://mcr.microsoft.com',
@@ -85,9 +86,7 @@ export const PLATFORMS = {
   'cr-heroku': 'https://registry.heroku.com',
   'cr-suse': 'https://registry.suse.com',
   'cr-opensuse': 'https://registry.opensuse.org',
-  'cr-gitpod': 'https://registry.gitpod.io',
-  // 添加 DockerHub 支持
-  'cr-dockerhub': 'https://registry-1.docker.io'
+  'cr-gitpod': 'https://registry.gitpod.io'
 };
 
 /**
@@ -106,13 +105,6 @@ export function transformPath(path, platformKey) {
     new RegExp(`^${prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`),
     '/'
   );
-
-  // Special handling for container registries
-  if (platformKey.startsWith('cr-')) {
-    // For container registries, we want to keep the path as-is after removing the platform prefix
-    // Example: /cr/dockerhub/v2/nginx/manifests/latest -> /v2/nginx/manifests/latest
-    return transformedPath;
-  }
 
   // Special handling for crates.io API paths
   if (platformKey === 'crates') {
@@ -152,6 +144,23 @@ export function transformPath(path, platformKey) {
       // /v2/homebrew/core/git/manifests/2.39.0 -> /v2/homebrew/core/git/manifests/2.39.0
       return transformedPath;
     }
+  }
+
+  // Special handling for DockerHub library images
+  if (platformKey === 'cr-dockerhub') {
+    // For DockerHub, handle library image redirection
+    // Example: /v2/nginx/manifests/latest -> /v2/library/nginx/manifests/latest
+    const pathParts = transformedPath.split('/');
+    if (pathParts.length >= 4 && pathParts[1] === 'v2') {
+      // Check if this is a library image (doesn't contain '/' in repository name)
+      const repoName = pathParts[2];
+      if (!repoName.includes('/') && repoName !== 'library') {
+        // Insert 'library' namespace for official images
+        pathParts.splice(2, 0, 'library');
+        transformedPath = pathParts.join('/');
+      }
+    }
+    return transformedPath;
   }
 
   // Special handling for Homebrew repositories
