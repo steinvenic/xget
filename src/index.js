@@ -562,6 +562,31 @@ async function handleRequest(request, env, ctx) {
                 }
               }
 
+              // Special handling for Docker Hub - it requires a different scope format
+              if (platform === 'cr-dockerhub') {
+                // For Docker Hub, we need to reconstruct the correct scope
+                // The path after /v2/ should be the repository name
+                const pathAfterV2 = finalTargetPath.substring(4); // Remove '/v2/' prefix
+                const pathSegments = pathAfterV2.split('/');
+                
+                // Handle manifest requests
+                if (pathSegments.includes('manifests') && pathSegments.length >= 3) {
+                  const repoName = pathSegments.slice(0, -2).join('/');
+                  const tag = pathSegments[pathSegments.length - 1];
+                  scope = `repository:${repoName}:pull`;
+                } 
+                // Handle blob requests
+                else if (pathSegments.includes('blobs') && pathSegments.length >= 3) {
+                  const repoName = pathSegments.slice(0, -2).join('/');
+                  scope = `repository:${repoName}:pull`;
+                }
+                // Handle other repository requests
+                else if (pathSegments.length >= 1) {
+                  const repoName = pathSegments.join('/');
+                  scope = `repository:${repoName}:pull`;
+                }
+              }
+
               // Try to get a token for public access (without authorization)
               const tokenResponse = await fetchToken(wwwAuthenticate, scope || '', '');
               if (tokenResponse.ok) {
