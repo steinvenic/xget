@@ -370,16 +370,6 @@ async function handleRequest(request, env, ctx) {
             return Response.redirect(redirectUrl, 301);
           }
         }
-        
-        // Ensure /v2 prefix
-        if (!targetPath.startsWith('/v2')) {
-          targetPath = '/v2' + targetPath;
-        }
-      } else {
-        // For other container registries, ensure /v2 prefix
-        if (!targetPath.startsWith('/v2')) {
-          targetPath = '/v2' + targetPath;
-        }
       }
       
       finalTargetPath = targetPath;
@@ -608,59 +598,8 @@ async function handleRequest(request, env, ctx) {
 
         // For container registry, handle authentication challenges more intelligently
         if (isDocker && response.status === 401) {
-          monitor.mark('docker_auth_challenge');
-
-          // For container registries, first check if we can get a token without credentials
-          // This allows access to public repositories
-          const authenticateStr = response.headers.get('WWW-Authenticate');
-          if (authenticateStr) {
-            try {
-              const wwwAuthenticate = parseAuthenticate(authenticateStr);
-
-              // Infer scope from the request path for container registry requests
-              let scope = '';
-              const pathParts = url.pathname.split('/');
-              if (pathParts.length >= 4 && pathParts[1] === 'v2') {
-                // Extract repository name from path like /v2/cr/ghcr/nginxinc/nginx-unprivileged/manifests/latest
-                // Remove /v2 and platform prefix to get the repo path
-                const repoPath = pathParts.slice(4).join('/'); // Skip /v2/cr/[registry]
-                const repoParts = repoPath.split('/');
-                if (repoParts.length >= 3) { // repo/name/type/tag
-                  const repoName = repoParts.slice(0, -2).join('/'); // Remove /manifests/tag or /blobs/sha
-                  if (repoName) {
-                    scope = `repository:${repoName}:pull`;
-                  }
-                }
-              }
-
-              // Try to get a token for public access (without authorization)
-              const tokenResponse = await fetchToken(wwwAuthenticate, scope || '', '');
-              if (tokenResponse.ok) {
-                const tokenData = await tokenResponse.json();
-                if (tokenData.token) {
-                  // Retry the original request with the obtained token
-                  const retryHeaders = new Headers(requestHeaders);
-                  retryHeaders.set('Authorization', `Bearer ${tokenData.token}`);
-
-                  const retryResponse = await fetch(targetUrl, {
-                    ...finalFetchOptions,
-                    headers: retryHeaders
-                  });
-
-                  if (retryResponse.ok) {
-                    response = retryResponse;
-                    monitor.mark('success');
-                    break;
-                  }
-                }
-              }
-            } catch (error) {
-              console.log('Token fetch failed:', error);
-            }
-          }
-
-          // If token fetch failed or didn't work, return the unauthorized response
-          // Only return this if we truly can't access the resource
+          // For container registries, return the 401 response with proper WWW-Authenticate header
+          // This allows the Docker client to handle authentication properly
           return responseUnauthorized(url);
         }
 
