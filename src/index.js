@@ -258,7 +258,10 @@ async function fetchToken(wwwAuthenticate, scope, authorization) {
  */
 function responseUnauthorized(url) {
   const headers = new Headers();
-  headers.set('WWW-Authenticate', `Bearer realm="https://${url.hostname}/v2/auth",service="Xget"`);
+  headers.set(
+    'WWW-Authenticate',
+    `Bearer realm="https://${url.hostname}/v2/auth",service="cloudflare-docker-proxy"`
+  );
   return new Response(JSON.stringify({ message: 'UNAUTHORIZED' }), {
     status: 401,
     headers: headers
@@ -340,24 +343,36 @@ async function handleRequest(request, env, ctx) {
     // Transform URL based on platform using unified logic
     let targetPath = transformPath(effectivePath, platform);
 
-    // For container registries, ensure we add the /v2 prefix for the Docker API
+    // For container registries, ensure we add the /v2 prefix for the Docker API if needed
     let finalTargetPath;
+    let isDockerHub = platform === 'cr-dockerhub';
     if (platform.startsWith('cr-')) {
       // Special handling for DockerHub library images
       // Example: /cr/dockerhub/v2/busybox/manifests/latest => /cr/dockerhub/v2/library/busybox/manifests/latest
-      if (platform === 'cr-dockerhub') {
+      if (isDockerHub) {
+        // Check if targetPath already starts with /v2, if not add it
+        if (!targetPath.startsWith('/v2')) {
+          targetPath = '/v2' + targetPath;
+        }
+        
         const pathParts = targetPath.split('/').filter(part => part !== '');
+        // Check if we need to add library prefix for DockerHub
+        // Path format: v2/[image]/manifests/[tag] or v2/[image]/blobs/[digest]
         if (pathParts.length >= 3) {
-          // Check if this is a library image path that needs the 'library/' prefix
-          // Path format: /v2/[image]/manifests/[tag] or /v2/[image]/blobs/[digest]
+          // Add 'library' prefix if not already present and not a multi-segment name
           if (!pathParts[1].includes('/') && !pathParts[1].startsWith('library/')) {
             pathParts.splice(1, 0, 'library');
-            targetPath = '/' + pathParts.join('/');
+            targetPath = '/v2/' + pathParts.slice(1).join('/');
           }
+        }
+      } else {
+        // For other container registries, ensure /v2 prefix
+        if (!targetPath.startsWith('/v2')) {
+          targetPath = '/v2' + targetPath;
         }
       }
       
-      finalTargetPath = `/v2${targetPath}`;
+      finalTargetPath = targetPath;
     } else {
       finalTargetPath = targetPath;
     }
@@ -419,7 +434,8 @@ async function handleRequest(request, env, ctx) {
     const fetchOptions = {
       method: request.method,
       headers: new Headers(),
-      redirect: 'follow'
+      // don't follow redirect to dockerhub blob upstream
+      redirect: isDocker && platform === 'cr-dockerhub' ? 'manual' : 'follow'
     };
 
     // Add body for POST/PUT/PATCH requests (Git/Docker/AI inference operations)
@@ -572,11 +588,7 @@ async function handleRequest(request, env, ctx) {
               method: 'GET',
               redirect: 'follow'
             });
-            response = redirectResp;
-            if (response.ok) {
-              monitor.mark('success');
-              break;
-            }
+            return redirectResp;
           }
         }
 
