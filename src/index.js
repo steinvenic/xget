@@ -263,15 +263,15 @@ async function fetchToken(wwwAuthenticate, scope, authorization) {
  */
 function responseUnauthorized(url) {
   const headers = new Headers();
+
   headers.set(
-    'WWW-Authenticate',
+    'Www-Authenticate',
     `Bearer realm="https://${url.hostname}/v2/auth",service="cloudflare-docker-proxy"`
   );
-  headers.set('Content-Type', 'application/json');
-  addSecurityHeaders(headers);
+
   return new Response(JSON.stringify({ message: 'UNAUTHORIZED' }), {
     status: 401,
-    headers: headers
+    headers: headers,
   });
 }
 
@@ -360,12 +360,14 @@ async function handleRequest(request, env, ctx) {
         const pathParts = targetPath.split('/');
         // Check if we need to add library prefix for DockerHub
         // Path format: /v2/[image]/manifests/[tag] or /v2/[image]/blobs/[digest]
-        if (pathParts.length >= 5 && pathParts[2] === 'v2') {
+        if (pathParts.length == 5) { // /v2/[image]/manifests/[tag] or /v2/[image]/blobs/[digest]
           // Add 'library' prefix if not already present and not a multi-segment name
-          if (!pathParts[3].includes('/') && !pathParts[3].startsWith('library/')) {
-            pathParts.splice(3, 0, 'library');
-            // Update the targetPath with the modified path
-            targetPath = pathParts.join('/');
+          if (!pathParts[2].includes('/') && !pathParts[2].startsWith('library/')) {
+            pathParts.splice(2, 0, 'library');
+            // Return redirect response instead of modifying the path
+            const redirectUrl = new URL(url);
+            redirectUrl.pathname = pathParts.join('/');
+            return Response.redirect(redirectUrl, 301);
           }
         }
         
@@ -406,6 +408,8 @@ async function handleRequest(request, env, ctx) {
       let scope = url.searchParams.get('scope');
       
       // Special handling for DockerHub scope autocomplete
+      // autocomplete repo part into scope for DockerHub library images
+      // Example: repository:busybox:pull => repository:library/busybox:pull
       if (platform === 'cr-dockerhub' && scope) {
         let scopeParts = scope.split(':');
         if (scopeParts.length == 3 && !scopeParts[1].includes('/')) {
@@ -597,19 +601,8 @@ async function handleRequest(request, env, ctx) {
             const redirectResp = await fetch(location, {
               method: 'GET',
               redirect: 'follow',
-              headers: {
-                'Authorization': request.headers.get('Authorization') || ''
-              }
             });
-            
-            // Copy headers from the redirect response
-            const redirectHeaders = new Headers(redirectResp.headers);
-            addSecurityHeaders(redirectHeaders);
-            
-            return new Response(redirectResp.body, {
-              status: redirectResp.status,
-              headers: redirectHeaders
-            });
+            return redirectResp;
           }
         }
 
