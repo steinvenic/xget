@@ -44,6 +44,11 @@ function isDockerRequest(request, url) {
   if (url.pathname.startsWith('/v2/')) {
     return true;
   }
+  
+  // Check for container registry paths with /cr/ prefix
+  if (url.pathname.startsWith('/cr/')) {
+    return true;
+  }
 
   // Check for Docker-specific User-Agent
   const userAgent = request.headers.get('User-Agent') || '';
