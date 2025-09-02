@@ -237,8 +237,8 @@ function parseAuthenticate(authenticateStr) {
 /**
  * Fetches authentication token from container registry
  * @param {{realm: string, service: string}} wwwAuthenticate - Authentication info
- * @param {string} scope - The scope for the token
- * @param {string} authorization - Authorization header value
+ * @param {string | null | undefined} scope - The scope for the token
+ * @param {string | null | undefined} authorization - Authorization header value
  * @returns {Promise<Response>} Token response
  */
 async function fetchToken(wwwAuthenticate, scope, authorization) {
@@ -267,6 +267,8 @@ function responseUnauthorized(url) {
     'WWW-Authenticate',
     `Bearer realm="https://${url.hostname}/v2/auth",service="cloudflare-docker-proxy"`
   );
+  headers.set('Content-Type', 'application/json');
+  addSecurityHeaders(headers);
   return new Response(JSON.stringify({ message: 'UNAUTHORIZED' }), {
     status: 401,
     headers: headers
@@ -358,14 +360,12 @@ async function handleRequest(request, env, ctx) {
         const pathParts = targetPath.split('/');
         // Check if we need to add library prefix for DockerHub
         // Path format: /v2/[image]/manifests/[tag] or /v2/[image]/blobs/[digest]
-        if (pathParts.length == 5) {
+        if (pathParts.length >= 5 && pathParts[2] === 'v2') {
           // Add 'library' prefix if not already present and not a multi-segment name
-          if (!pathParts[2].includes('/') && !pathParts[2].startsWith('library/')) {
-            pathParts.splice(2, 0, 'library');
-            // Return redirect response instead of modifying the path
-            const redirectUrl = new URL(url);
-            redirectUrl.pathname = pathParts.join('/');
-            return Response.redirect(redirectUrl, 301);
+          if (!pathParts[3].includes('/') && !pathParts[3].startsWith('library/')) {
+            pathParts.splice(3, 0, 'library');
+            // Update the targetPath with the modified path
+            targetPath = pathParts.join('/');
           }
         }
         
@@ -414,7 +414,9 @@ async function handleRequest(request, env, ctx) {
         }
       }
       
-      return await fetchToken(wwwAuthenticate, scope, authorization);
+      // Handle authorization header
+      const authHeader = authorization ? authorization : '';
+      return await fetchToken(wwwAuthenticate, scope, authHeader);
     }
 
     // Check if this is a Git operation
@@ -594,9 +596,20 @@ async function handleRequest(request, env, ctx) {
           if (location) {
             const redirectResp = await fetch(location, {
               method: 'GET',
-              redirect: 'follow'
+              redirect: 'follow',
+              headers: {
+                'Authorization': request.headers.get('Authorization') || ''
+              }
             });
-            return redirectResp;
+            
+            // Copy headers from the redirect response
+            const redirectHeaders = new Headers(redirectResp.headers);
+            addSecurityHeaders(redirectHeaders);
+            
+            return new Response(redirectResp.body, {
+              status: redirectResp.status,
+              headers: redirectHeaders
+            });
           }
         }
 
@@ -619,7 +632,7 @@ async function handleRequest(request, env, ctx) {
                 // Remove /v2 and platform prefix to get the repo path
                 const repoPath = pathParts.slice(4).join('/'); // Skip /v2/cr/[registry]
                 const repoParts = repoPath.split('/');
-                if (repoParts.length >= 1) {
+                if (repoParts.length >= 3) { // repo/name/type/tag
                   const repoName = repoParts.slice(0, -2).join('/'); // Remove /manifests/tag or /blobs/sha
                   if (repoName) {
                     scope = `repository:${repoName}:pull`;
