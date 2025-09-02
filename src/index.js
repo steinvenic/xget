@@ -338,11 +338,25 @@ async function handleRequest(request, env, ctx) {
     }
 
     // Transform URL based on platform using unified logic
-    const targetPath = transformPath(effectivePath, platform);
+    let targetPath = transformPath(effectivePath, platform);
 
     // For container registries, ensure we add the /v2 prefix for the Docker API
     let finalTargetPath;
     if (platform.startsWith('cr-')) {
+      // Special handling for DockerHub library images
+      // Example: /cr/dockerhub/v2/busybox/manifests/latest => /cr/dockerhub/v2/library/busybox/manifests/latest
+      if (platform === 'cr-dockerhub') {
+        const pathParts = targetPath.split('/').filter(part => part !== '');
+        if (pathParts.length >= 3) {
+          // Check if this is a library image path that needs the 'library/' prefix
+          // Path format: /v2/[image]/manifests/[tag] or /v2/[image]/blobs/[digest]
+          if (!pathParts[1].includes('/') && !pathParts[1].startsWith('library/')) {
+            pathParts.splice(1, 0, 'library');
+            targetPath = '/' + pathParts.join('/');
+          }
+        }
+      }
+      
       finalTargetPath = `/v2${targetPath}`;
     } else {
       finalTargetPath = targetPath;
@@ -367,6 +381,16 @@ async function handleRequest(request, env, ctx) {
       }
       const wwwAuthenticate = parseAuthenticate(authenticateStr);
       let scope = url.searchParams.get('scope');
+      
+      // Special handling for DockerHub scope autocomplete
+      if (platform === 'cr-dockerhub' && scope) {
+        let scopeParts = scope.split(':');
+        if (scopeParts.length == 3 && !scopeParts[1].includes('/')) {
+          scopeParts[1] = 'library/' + scopeParts[1];
+          scope = scopeParts.join(':');
+        }
+      }
+      
       return await fetchToken(wwwAuthenticate, scope || '', authorization || '');
     }
 
@@ -448,6 +472,11 @@ async function handleRequest(request, env, ctx) {
           requestHeaders.set('User-Agent', 'Xget-AI-Proxy/1.0');
         }
       }
+      
+      // For DockerHub requests, don't follow redirects automatically for blob requests
+      if (isDocker && platform === 'cr-dockerhub') {
+        fetchOptions.redirect = 'manual';
+      }
     } else {
       // Regular file download headers
       Object.assign(fetchOptions, {
@@ -502,7 +531,7 @@ async function handleRequest(request, env, ctx) {
             const getResponse = await fetch(targetUrl, {
               ...finalFetchOptions,
               method: 'GET'
-            });
+              });
 
             if (getResponse.ok) {
               // Create a new response with HEAD method but include Content-Length from GET
@@ -535,6 +564,22 @@ async function handleRequest(request, env, ctx) {
           break;
         }
 
+        // Handle DockerHub blob redirect manually
+        if (isDocker && platform === 'cr-dockerhub' && response.status === 307) {
+          const location = response.headers.get('Location');
+          if (location) {
+            const redirectResp = await fetch(location, {
+              method: 'GET',
+              redirect: 'follow'
+            });
+            response = redirectResp;
+            if (response.ok) {
+              monitor.mark('success');
+              break;
+            }
+          }
+        }
+
         // For container registry, handle authentication challenges more intelligently
         if (isDocker && response.status === 401) {
           monitor.mark('docker_auth_challenge');
@@ -559,31 +604,6 @@ async function handleRequest(request, env, ctx) {
                   if (repoName) {
                     scope = `repository:${repoName}:pull`;
                   }
-                }
-              }
-
-              // Special handling for Docker Hub - it requires a different scope format
-              if (platform === 'cr-dockerhub') {
-                // For Docker Hub, we need to reconstruct the correct scope
-                // The path after /v2/ should be the repository name
-                const pathAfterV2 = finalTargetPath.substring(4); // Remove '/v2/' prefix
-                const pathSegments = pathAfterV2.split('/');
-                
-                // Handle manifest requests
-                if (pathSegments.includes('manifests') && pathSegments.length >= 3) {
-                  const repoName = pathSegments.slice(0, -2).join('/');
-                  const tag = pathSegments[pathSegments.length - 1];
-                  scope = `repository:${repoName}:pull`;
-                } 
-                // Handle blob requests
-                else if (pathSegments.includes('blobs') && pathSegments.length >= 3) {
-                  const repoName = pathSegments.slice(0, -2).join('/');
-                  scope = `repository:${repoName}:pull`;
-                }
-                // Handle other repository requests
-                else if (pathSegments.length >= 1) {
-                  const repoName = pathSegments.join('/');
-                  scope = `repository:${repoName}:pull`;
                 }
               }
 
