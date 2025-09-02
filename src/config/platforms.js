@@ -107,6 +107,13 @@ export function transformPath(path, platformKey) {
     '/'
   );
 
+  // Special handling for container registries
+  if (platformKey.startsWith('cr-')) {
+    // For container registries, we want to keep the path as-is after removing the platform prefix
+    // Example: /cr/dockerhub/v2/nginx/manifests/latest -> /v2/nginx/manifests/latest
+    return transformedPath;
+  }
+
   // Special handling for crates.io API paths
   if (platformKey === 'crates') {
     // Transform paths to include the API prefix
