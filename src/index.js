@@ -302,6 +302,53 @@ async function handleRequest(request, env, ctx) {
       return createErrorResponse(validation.error || 'Validation failed', validation.status || 400);
     }
 
+    // Handle Docker authentication EARLY (like good-worker.js)
+    if (isDocker && url.pathname === '/v2/auth') {
+      // Parse platform from URL to determine upstream
+      let detectedPlatform = 'cr-dockerhub'; // default to dockerhub
+      
+      // Try to detect platform from referer header
+      const referer = request.headers.get('Referer') || '';
+      if (referer.includes('/cr/')) {
+        const refererUrl = new URL(referer);
+        const refererParts = refererUrl.pathname.split('/');
+        if (refererParts.length >= 3 && refererParts[1] === 'cr') {
+          const platformCandidate = 'cr-' + refererParts[2];
+          if (config.PLATFORMS[platformCandidate]) {
+            detectedPlatform = platformCandidate;
+          }
+        }
+      }
+      
+      const newUrl = new URL(config.PLATFORMS[detectedPlatform] + '/v2/');
+      const resp = await fetch(newUrl.toString(), {
+        method: 'GET',
+        redirect: 'follow'
+      });
+      if (resp.status !== 401) {
+        return resp;
+      }
+      const authenticateStr = resp.headers.get('WWW-Authenticate');
+      if (authenticateStr === null) {
+        return resp;
+      }
+      const wwwAuthenticate = parseAuthenticate(authenticateStr);
+      let scope = url.searchParams.get('scope');
+      
+      // Special handling for DockerHub library images in scope
+      if (detectedPlatform === 'cr-dockerhub' && scope) {
+        let scopeParts = scope.split(':');
+        if (scopeParts.length === 3 && !scopeParts[1].includes('/')) {
+          // Autocomplete repo part into scope for DockerHub library images
+          // Example: repository:busybox:pull => repository:library/busybox:pull
+          scopeParts[1] = 'library/' + scopeParts[1];
+          scope = scopeParts.join(':');
+        }
+      }
+      
+      return await fetchToken(wwwAuthenticate, scope || '', authorization || '');
+    }
+
     // Parse platform and path
     let platform;
     let effectivePath = url.pathname;
@@ -316,8 +363,6 @@ async function handleRequest(request, env, ctx) {
       // Remove /v2 from the path for container registry API consistency if present
       effectivePath = url.pathname.replace(/^\/v2/, '');
     }
-
-    // Platform detection using transform patterns
     // Sort platforms by path length (descending) to prioritize more specific paths
     // e.g., conda/community should match before conda, pypi/files before pypi
     const sortedPlatforms = Object.keys(config.PLATFORMS).sort((a, b) => {
@@ -351,49 +396,18 @@ async function handleRequest(request, env, ctx) {
     const targetUrl = `${config.PLATFORMS[platform]}${finalTargetPath}${url.search}`;
     const authorization = request.headers.get('Authorization');
 
-    // Special DockerHub library image redirection (before authentication)
+    // Special DockerHub library image redirection (like good-worker.js)
     if (platform === 'cr-dockerhub' && isDocker) {
       const pathParts = url.pathname.split('/');
       // Handle redirect for DockerHub library images
       // Example: /cr/dockerhub/v2/busybox/manifests/latest => /cr/dockerhub/v2/library/busybox/manifests/latest
-      if (pathParts.length === 6 && pathParts[3] && !pathParts[3].includes('/')) {
+      if (pathParts.length === 6 && pathParts[4] && !pathParts[4].includes('/')) {
         // This is a library image request, redirect to include library namespace
-        pathParts.splice(3, 0, 'library');
+        pathParts.splice(4, 0, 'library');
         const redirectUrl = new URL(url);
         redirectUrl.pathname = pathParts.join('/');
         return Response.redirect(redirectUrl, 301);
       }
-    }
-
-    // Handle Docker authentication
-    if (isDocker && url.pathname === '/v2/auth') {
-      const newUrl = new URL(config.PLATFORMS[platform] + '/v2/');
-      const resp = await fetch(newUrl.toString(), {
-        method: 'GET',
-        redirect: 'follow'
-      });
-      if (resp.status !== 401) {
-        return resp;
-      }
-      const authenticateStr = resp.headers.get('WWW-Authenticate');
-      if (authenticateStr === null) {
-        return resp;
-      }
-      const wwwAuthenticate = parseAuthenticate(authenticateStr);
-      let scope = url.searchParams.get('scope');
-      
-      // Special handling for DockerHub library images in scope
-      if (platform === 'cr-dockerhub' && scope) {
-        let scopeParts = scope.split(':');
-        if (scopeParts.length === 3 && !scopeParts[1].includes('/')) {
-          // Autocomplete repo part into scope for DockerHub library images
-          // Example: repository:busybox:pull => repository:library/busybox:pull
-          scopeParts[1] = 'library/' + scopeParts[1];
-          scope = scopeParts.join(':');
-        }
-      }
-      
-      return await fetchToken(wwwAuthenticate, scope || '', authorization || '');
     }
 
     // Check if this is a Git operation
@@ -421,7 +435,8 @@ async function handleRequest(request, env, ctx) {
     const fetchOptions = {
       method: request.method,
       headers: new Headers(),
-      redirect: 'follow'
+      // Don't follow redirect to dockerhub blob upstream (like good-worker.js)
+      redirect: platform === 'cr-dockerhub' ? 'manual' : 'follow'
     };
 
     // Add body for POST/PUT/PATCH requests (Git/Docker/AI inference operations)
