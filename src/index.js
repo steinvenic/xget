@@ -252,6 +252,37 @@ async function fetchToken(wwwAuthenticate, scope, authorization) {
 }
 
 /**
+ * Infers the scope from the request path for Docker registry requests
+ * @param {string} pathname - The request pathname
+ * @returns {string} The inferred scope or empty string
+ */
+function inferScopeFromPath(pathname) {
+  const pathParts = pathname.split('/');
+  if (pathParts.length >= 4 && pathParts[1] === 'v2') {
+    // Extract repository name from path like /v2/nginx/manifests/latest
+    // For direct Docker API paths, extract the repository name directly
+    if (pathParts[2] === 'library') {
+      // Path like /v2/library/nginx/manifests/latest
+      const repoName = pathParts.slice(2, -2).join('/'); // library/nginx
+      if (repoName) {
+        return `repository:${repoName}:pull`;
+      }
+    } else if (pathParts.length === 5) {
+      // Path like /v2/nginx/manifests/latest (auto-add library prefix)
+      const repoName = `library/${pathParts[2]}`; // library/nginx
+      return `repository:${repoName}:pull`;
+    } else if (pathParts.length > 5) {
+      // Path like /v2/user/repo/manifests/latest
+      const repoName = pathParts.slice(2, -2).join('/'); // user/repo
+      if (repoName) {
+        return `repository:${repoName}:pull`;
+      }
+    }
+  }
+  return '';
+}
+
+/**
  * Creates unauthorized response for container registry
  * @param {URL} url - Request URL
  * @returns {Response} Unauthorized response
@@ -394,6 +425,30 @@ async function handleRequest(request, env, ctx) {
     const targetUrl = `${config.PLATFORMS[platform]}${finalTargetPath}${url.search}`;
     const authorization = request.headers.get('Authorization');
 
+    // For Docker requests without authorization, try to get an anonymous token first
+    let anonymousToken = null;
+    if (isDocker && !authorization && (platform === 'docker' || platform === 'dockerhub')) {
+      try {
+        // Try to get a token for public access
+        const scope = inferScopeFromPath(url.pathname);
+        if (scope) {
+          const tokenResponse = await fetchToken(
+            { realm: 'https://auth.docker.io/token', service: 'registry.docker.io' },
+            scope,
+            ''
+          );
+          if (tokenResponse.ok) {
+            const tokenData = await tokenResponse.json();
+            if (tokenData.token) {
+              anonymousToken = tokenData.token;
+            }
+          }
+        }
+      } catch (error) {
+        console.log('Failed to get anonymous token:', error);
+      }
+    }
+
     // Handle Docker authentication (based on good-worker.js logic)
     if (isDocker && url.pathname === '/v2/auth') {
       const newUrl = new URL(`${config.PLATFORMS[platform]}/v2/`);
@@ -482,6 +537,11 @@ async function handleRequest(request, env, ctx) {
         if (!['host', 'connection', 'upgrade', 'proxy-connection'].includes(key.toLowerCase())) {
           requestHeaders.set(key, value);
         }
+      }
+
+      // For Docker requests, use anonymous token if available and no authorization header
+      if (isDocker && anonymousToken && !requestHeaders.has('Authorization')) {
+        requestHeaders.set('Authorization', `Bearer ${anonymousToken}`);
       }
 
       // Set Git-specific headers if not present
@@ -637,20 +697,7 @@ async function handleRequest(request, env, ctx) {
               const wwwAuthenticate = parseAuthenticate(authenticateStr);
 
               // Infer scope from the request path for container registry requests
-              let scope = '';
-              const pathParts = url.pathname.split('/');
-              if (pathParts.length >= 4 && pathParts[1] === 'v2') {
-                // Extract repository name from path like /v2/cr/ghcr/nginxinc/nginx-unprivileged/manifests/latest
-                // Remove /v2 and platform prefix to get the repo path
-                const repoPath = pathParts.slice(4).join('/'); // Skip /v2/cr/[registry]
-                const repoParts = repoPath.split('/');
-                if (repoParts.length >= 1) {
-                  const repoName = repoParts.slice(0, -2).join('/'); // Remove /manifests/tag or /blobs/sha
-                  if (repoName) {
-                    scope = `repository:${repoName}:pull`;
-                  }
-                }
-              }
+              const scope = inferScopeFromPath(url.pathname);
 
               // Try to get a token for public access (without authorization)
               const tokenResponse = await fetchToken(wwwAuthenticate, scope || '', '');
