@@ -86,18 +86,17 @@ export const PLATFORMS = {
   'cr-suse': 'https://registry.suse.com',
   'cr-opensuse': 'https://registry.opensuse.org',
   'cr-gitpod': 'https://registry.gitpod.io',
-  
+
   // Docker Hub and related registries (based on good-worker.js logic)
-  'docker-hub': 'https://registry-1.docker.io',
   'docker': 'https://registry-1.docker.io',
+  'docker-staging': 'https://registry-1.docker.io',
   'quay': 'https://quay.io',
   'gcr': 'https://gcr.io',
   'k8s-gcr': 'https://k8s.gcr.io',
   'k8s': 'https://registry.k8s.io',
   'ghcr': 'https://ghcr.io',
   'cloudsmith': 'https://docker.cloudsmith.io',
-  'ecr': 'https://public.ecr.aws',
-  'docker-staging': 'https://registry-1.docker.io'
+  'ecr': 'https://public.ecr.aws'
 };
 
 /**
@@ -169,23 +168,11 @@ export function transformPath(path, platformKey) {
     }
   }
 
-  // Special handling for Docker Hub and related registries
-  if (platformKey === 'docker-hub' || platformKey === 'docker') {
-    // For Docker Hub, ensure /v2 prefix is maintained
-    if (transformedPath.startsWith('/')) {
-      // Docker Hub API requires /v2 prefix
-      if (!transformedPath.startsWith('/v2/')) {
-        transformedPath = `/v2${transformedPath}`;
-      }
-      
-      // Handle library image redirects for Docker Hub
-      // Example: /v2/busybox/manifests/latest -> /v2/library/busybox/manifests/latest
-      const pathParts = transformedPath.split('/');
-      if (pathParts.length === 5 && pathParts[1] === 'v2' && !pathParts[2].includes('/')) {
-        pathParts.splice(2, 0, 'library');
-        transformedPath = pathParts.join('/');
-      }
-    }
+  // Special handling for Docker Hub and container registries (based on good-worker.js logic)
+  if (platformKey === 'docker' || platformKey === 'quay' || platformKey === 'gcr' || platformKey === 'k8s-gcr' || platformKey === 'k8s' || platformKey === 'ghcr' || platformKey === 'cloudsmith' || platformKey === 'ecr' || platformKey === 'docker-staging') {
+    // For Docker registries, keep the transformed path as-is
+    // The /v2 prefix will be added in the main handler
+    return transformedPath;
   }
 
   return transformedPath;

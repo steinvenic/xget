@@ -212,46 +212,25 @@ function addSecurityHeaders(headers) {
 }
 
 /**
- * Check if a platform is Docker Hub
- * @param {string} platformUrl - The platform URL to check
- * @returns {boolean} True if the platform is Docker Hub
- */
-function isDockerHub(platformUrl) {
-  return platformUrl === 'https://registry-1.docker.io';
-}
-
-/**
- * Check if a platform is a container registry
- * @param {string} platformKey - The platform key to check
- * @returns {boolean} True if the platform is a container registry
- */
-function isContainerRegistry(platformKey) {
-  return platformKey.startsWith('cr-') || 
-         platformKey === 'docker-hub' || 
-         platformKey === 'docker' ||
-         ['quay', 'gcr', 'k8s-gcr', 'k8s', 'ghcr', 'cloudsmith', 'ecr', 'docker-staging'].includes(platformKey);
-}
-
-/**
- * Parse Docker WWW-Authenticate header
+ * Parses Docker WWW-Authenticate header
  * @param {string} authenticateStr - The WWW-Authenticate header value
  * @returns {{realm: string, service: string}} Parsed authentication info
  */
 function parseAuthenticate(authenticateStr) {
   // sample: Bearer realm="https://auth.ipv6.docker.com/token",service="registry.docker.io"
-  // match strings after =" and before "
   const re = /(?<=\=")(?:\\.|[^"\\])*(?=")/g;
   const matches = authenticateStr.match(re);
-
   if (matches == null || matches.length < 2) {
     throw new Error(`invalid Www-Authenticate Header: ${authenticateStr}`);
   }
-
-  return { realm: matches[0], service: matches[1] };
+  return {
+    realm: matches[0],
+    service: matches[1]
+  };
 }
 
 /**
- * Fetch authentication token from container registry
+ * Fetches authentication token from container registry
  * @param {{realm: string, service: string}} wwwAuthenticate - Authentication info
  * @param {string} scope - The scope for the token
  * @param {string} authorization - Authorization header value
@@ -262,21 +241,18 @@ async function fetchToken(wwwAuthenticate, scope, authorization) {
   if (wwwAuthenticate.service.length) {
     url.searchParams.set('service', wwwAuthenticate.service);
   }
-
   if (scope) {
     url.searchParams.set('scope', scope);
   }
-
   const headers = new Headers();
   if (authorization) {
     headers.set('Authorization', authorization);
   }
-
-  return await fetch(url, { method: 'GET', headers: headers });
+  return await fetch(url, { method: 'GET', headers });
 }
 
 /**
- * Create unauthorized response for container registry
+ * Creates unauthorized response for container registry
  * @param {URL} url - Request URL
  * @returns {Response} Unauthorized response
  */
@@ -285,48 +261,9 @@ function responseUnauthorized(url) {
   headers.set('WWW-Authenticate', `Bearer realm="https://${url.hostname}/v2/auth",service="Xget"`);
   return new Response(JSON.stringify({ message: 'UNAUTHORIZED' }), {
     status: 401,
-    headers: headers
+    headers
   });
 }
-
-/**
- * Handle Docker Hub library image scope completion
- * @param {string} scope - The original scope
- * @returns {string} The completed scope with library prefix if needed
- */
-function completeDockerHubScope(scope) {
-  if (!scope) return scope;
-  
-  // autocomplete repo part into scope for DockerHub library images
-  // Example: repository:busybox:pull => repository:library/busybox:pull
-  let scopeParts = scope.split(':');
-  if (scopeParts.length == 3 && !scopeParts[1].includes('/')) {
-    scopeParts[1] = 'library/' + scopeParts[1];
-    scope = scopeParts.join(':');
-  }
-  
-  return scope;
-}
-
-/**
- * Handle Docker Hub library image path redirect
- * @param {string} pathname - The request pathname
- * @returns {string|null} The redirect path or null if no redirect needed
- */
-function handleDockerHubLibraryRedirect(pathname) {
-  // redirect for DockerHub library images
-  // Example: /v2/busybox/manifests/latest => /v2/library/busybox/manifests/latest
-  const pathParts = pathname.split('/');
-  if (pathParts.length == 5) {
-    pathParts.splice(2, 0, 'library');
-    return pathParts.join('/');
-  }
-  return null;
-}
-
-
-
-
 
 /**
  * Handles incoming requests with caching, retries, and security measures
@@ -344,19 +281,20 @@ async function handleRequest(request, env, ctx) {
 
     const monitor = new PerformanceMonitor();
 
-    // Handle Docker API version check
-    if (isDocker && (url.pathname === '/v2/' || url.pathname === '/v2')) {
-      const headers = new Headers({
-        'Docker-Distribution-Api-Version': 'registry/2.0',
-        'Content-Type': 'application/json'
-      });
-      addSecurityHeaders(headers);
-      return new Response('{}', { status: 200, headers });
-    }
+    // Handle Docker API version check and root redirect (based on good-worker.js logic)
+    if (isDocker) {
+      if (url.pathname === '/' || url.pathname === '') {
+        return Response.redirect(`${url.protocol}//${url.host}/v2/`, 301);
+      }
 
-    // Handle Docker Hub root path redirect (based on good-worker.js logic)
-    if (isDocker && url.pathname === '/') {
-      return Response.redirect(url.protocol + '//' + url.host + '/v2/', 301);
+      if (url.pathname === '/v2/' || url.pathname === '/v2') {
+        const headers = new Headers({
+          'Docker-Distribution-Api-Version': 'registry/2.0',
+          'Content-Type': 'application/json'
+        });
+        addSecurityHeaders(headers);
+        return new Response('{}', { status: 200, headers });
+      }
     }
 
     // Redirect root path or invalid platforms to GitHub repository
@@ -374,15 +312,20 @@ async function handleRequest(request, env, ctx) {
     let platform;
     let effectivePath = url.pathname;
 
-    // Handle container registry paths specially
+    // Handle container registry paths specially (based on good-worker.js logic)
     if (isDocker) {
-      // For Docker requests (excluding version check which is handled above),
-      // check if they have /cr/ prefix
-      if (!url.pathname.startsWith('/cr/') && !url.pathname.startsWith('/v2/cr/')) {
-        return createErrorResponse('container registry requests must use /cr/ prefix', 400);
+      // For Docker requests, allow both /cr/ prefix and direct Docker Hub paths
+      // This allows both /cr/docker/nginx and /docker/nginx to work
+      if (url.pathname.startsWith('/cr/')) {
+        // Remove /cr prefix for container registry API consistency
+        effectivePath = url.pathname.replace(/^\/cr/, '');
+      } else if (url.pathname.startsWith('/v2/')) {
+        // Direct Docker API paths like /v2/nginx/manifests/latest
+        effectivePath = url.pathname;
+      } else {
+        // For other Docker paths, keep as is
+        effectivePath = url.pathname;
       }
-      // Remove /v2 from the path for container registry API consistency if present
-      effectivePath = url.pathname.replace(/^\/v2/, '');
     }
 
     // Platform detection using transform patterns
@@ -394,11 +337,39 @@ async function handleRequest(request, env, ctx) {
       return pathB.length - pathA.length;
     });
 
-    platform =
-      sortedPlatforms.find(key => {
-        const expectedPrefix = `/${key.replace('-', '/')}/`;
-        return effectivePath.startsWith(expectedPrefix);
-      }) || effectivePath.split('/')[1];
+    // Special handling for Docker paths (based on good-worker.js logic)
+    if (isDocker) {
+      if (url.pathname.startsWith('/v2/')) {
+        // Direct Docker API paths like /v2/nginx/manifests/latest
+        // Extract the first path segment after /v2/ to determine the registry
+        const pathParts = url.pathname.split('/');
+        if (pathParts.length >= 3) {
+          const registryName = pathParts[2];
+          // Map common registry names to platform keys
+          if (registryName === 'library' || config.PLATFORMS['docker']) {
+            platform = 'docker'; // Docker Hub library images or direct docker access
+          } else if (config.PLATFORMS[registryName]) {
+            platform = registryName; // Other registries like quay, gcr, etc.
+          } else {
+            platform = 'docker'; // Default to Docker Hub
+          }
+        } else {
+          platform = 'docker';
+        }
+      } else {
+        // Paths like /docker/nginx or /cr/docker/nginx
+        platform = sortedPlatforms.find(key => {
+          const expectedPrefix = `/${key.replace('-', '/')}/`;
+          return effectivePath.startsWith(expectedPrefix);
+        }) || effectivePath.split('/')[1];
+      }
+    } else {
+      platform =
+        sortedPlatforms.find(key => {
+          const expectedPrefix = `/${key.replace('-', '/')}/`;
+          return effectivePath.startsWith(expectedPrefix);
+        }) || effectivePath.split('/')[1];
+    }
 
     if (!platform || !config.PLATFORMS[platform]) {
       const HOME_PAGE_URL = 'https://github.com/xixu-me/Xget';
@@ -408,36 +379,25 @@ async function handleRequest(request, env, ctx) {
     // Transform URL based on platform using unified logic
     const targetPath = transformPath(effectivePath, platform);
 
-    // Handle Docker Hub library image path redirect (based on good-worker.js logic)
-    const isDockerHubPlatform = isDockerHub(config.PLATFORMS[platform]);
-    if (isDockerHubPlatform && url.pathname.startsWith('/v2/')) {
-      const redirectPath = handleDockerHubLibraryRedirect(url.pathname);
-      if (redirectPath) {
-        const redirectUrl = new URL(url);
-        redirectUrl.pathname = redirectPath;
-        return Response.redirect(redirectUrl, 301);
-      }
-    }
-
-    // For container registries, ensure we add the /v2 prefix for the Docker API
+    // For container registries and Docker Hub, ensure we add the /v2 prefix for the Docker API
     let finalTargetPath;
-    if (platform.startsWith('cr-')) {
-      finalTargetPath = `/v2${targetPath}`;
+    if (platform.startsWith('cr-') || platform === 'docker' || platform === 'quay' || platform === 'gcr' || platform === 'k8s-gcr' || platform === 'k8s' || platform === 'ghcr' || platform === 'cloudsmith' || platform === 'ecr' || platform === 'docker-staging') {
+      // If the path already starts with /v2, don't add it again
+      if (targetPath.startsWith('/v2')) {
+        finalTargetPath = targetPath;
+      } else {
+        finalTargetPath = `/v2${targetPath}`;
+      }
     } else {
       finalTargetPath = targetPath;
-    }
-
-    // Docker Hub specific path handling (based on good-worker.js logic)
-    if (isDockerHubPlatform && !finalTargetPath.startsWith('/v2/')) {
-      finalTargetPath = `/v2${finalTargetPath}`;
     }
 
     const targetUrl = `${config.PLATFORMS[platform]}${finalTargetPath}${url.search}`;
     const authorization = request.headers.get('Authorization');
 
-    // Handle Docker authentication
+    // Handle Docker authentication (based on good-worker.js logic)
     if (isDocker && url.pathname === '/v2/auth') {
-      const newUrl = new URL(config.PLATFORMS[platform] + '/v2/');
+      const newUrl = new URL(`${config.PLATFORMS[platform]}/v2/`);
       const resp = await fetch(newUrl.toString(), {
         method: 'GET',
         redirect: 'follow'
@@ -451,12 +411,17 @@ async function handleRequest(request, env, ctx) {
       }
       const wwwAuthenticate = parseAuthenticate(authenticateStr);
       let scope = url.searchParams.get('scope');
-      
-      // Docker Hub specific scope handling (based on good-worker.js logic)
-      if (scope && isDockerHubPlatform) {
-        scope = completeDockerHubScope(scope);
+
+      // autocomplete repo part into scope for DockerHub library images (based on good-worker.js logic)
+      // Example: repository:busybox:pull => repository:library/busybox:pull
+      if (scope && platform === 'docker') {
+        const scopeParts = scope.split(':');
+        if (scopeParts.length === 3 && !scopeParts[1].includes('/')) {
+          scopeParts[1] = `library/${scopeParts[1]}`;
+          scope = scopeParts.join(':');
+        }
       }
-      
+
       return await fetchToken(wwwAuthenticate, scope || '', authorization || '');
     }
 
@@ -465,6 +430,19 @@ async function handleRequest(request, env, ctx) {
 
     // Check if this is an AI inference request
     const isAI = isAIInferenceRequest(request, url);
+
+    // redirect for DockerHub library images (based on good-worker.js logic)
+    // Example: /v2/busybox/manifests/latest => /v2/library/busybox/manifests/latest
+    if (isDocker && platform === 'docker') {
+      const pathParts = url.pathname.split('/');
+      if (pathParts.length === 5) {
+        pathParts.splice(2, 0, 'library');
+        const redirectUrl = new URL(url);
+        redirectUrl.pathname = pathParts.join('/');
+
+        return Response.redirect(redirectUrl, 301);
+      }
+    }
 
     // Check cache first (skip cache for Git, Docker, and AI inference operations)
     /** @type {Cache} */
@@ -485,8 +463,7 @@ async function handleRequest(request, env, ctx) {
     const fetchOptions = {
       method: request.method,
       headers: new Headers(),
-      // don't follow redirect to dockerhub blob upstream (based on good-worker.js logic)
-      redirect: isDockerHubPlatform ? 'manual' : 'follow'
+      redirect: 'follow'
     };
 
     // Add body for POST/PUT/PATCH requests (Git/Docker/AI inference operations)
@@ -571,17 +548,25 @@ async function handleRequest(request, env, ctx) {
     let attempts = 0;
     while (attempts < config.MAX_RETRIES) {
       try {
-        monitor.mark('attempt_' + attempts);
+        monitor.mark(`attempt_${attempts}`);
 
         // Fetch with timeout
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), config.TIMEOUT_SECONDS * 1000);
 
         // For Git/Docker operations, don't use Cloudflare-specific options
-        const finalFetchOptions =
-          isGit || isDocker
-            ? { ...fetchOptions, signal: controller.signal }
-            : { ...fetchOptions, signal: controller.signal };
+        // For Docker Hub, don't follow redirects to blob upstream (based on good-worker.js logic)
+        const finalFetchOptions = {
+          ...fetchOptions,
+          signal: controller.signal
+        };
+
+        // Set redirect property with proper typing
+        if (isGit || (isDocker && platform !== 'docker')) {
+          finalFetchOptions.redirect = 'follow';
+        } else {
+          finalFetchOptions.redirect = 'manual';
+        }
 
         // Special handling for HEAD requests to ensure Content-Length header
         if (request.method === 'HEAD') {
@@ -620,6 +605,21 @@ async function handleRequest(request, env, ctx) {
         }
 
         clearTimeout(timeoutId);
+
+        // handle dockerhub blob redirect manually (based on good-worker.js logic)
+        if (isDocker && platform === 'docker' && response.status === 307) {
+          const locationHeader = response.headers.get('Location');
+          if (locationHeader) {
+            const location = new URL(locationHeader);
+            const redirectResp = await fetch(location.toString(), {
+              method: 'GET',
+              redirect: 'follow'
+            });
+            response = redirectResp;
+            monitor.mark('success');
+            break;
+          }
+        }
 
         if (response.ok || response.status === 206) {
           monitor.mark('success');
@@ -682,21 +682,6 @@ async function handleRequest(request, env, ctx) {
           // If token fetch failed or didn't work, return the unauthorized response
           // Only return this if we truly can't access the resource
           return responseUnauthorized(url);
-        }
-
-        // Handle Docker Hub blob redirect manually (based on good-worker.js logic)
-        if (isDockerHubPlatform && response.status === 307) {
-          const locationHeader = response.headers.get('Location');
-          if (locationHeader) {
-            const location = new URL(locationHeader);
-            const redirectResp = await fetch(location.toString(), {
-              method: 'GET',
-              redirect: 'follow'
-            });
-            response = redirectResp;
-            monitor.mark('docker_blob_redirect');
-            break;
-          }
         }
 
         // Don't retry on client errors (4xx) - these won't improve with retries
@@ -808,7 +793,7 @@ async function handleRequest(request, env, ctx) {
     // Create final response
     const finalResponse = new Response(responseBody, {
       status: response.status,
-      headers: headers
+      headers
     });
 
     // Cache successful responses (skip caching for Git, Docker, and AI inference operations)
@@ -846,7 +831,7 @@ function addPerformanceHeaders(response, monitor) {
   addSecurityHeaders(headers);
   return new Response(response.body, {
     status: response.status,
-    headers: headers
+    headers
   });
 }
 
