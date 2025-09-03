@@ -70,7 +70,6 @@ export const PLATFORMS = {
   'ip-hyperbolic': 'https://api.hyperbolic.xyz',
 
   // Container Registries
-  'cr-dockerhub': 'https://registry-1.docker.io',
   'cr-quay': 'https://quay.io',
   'cr-gcr': 'https://gcr.io',
   'cr-mcr': 'https://mcr.microsoft.com',
@@ -86,7 +85,19 @@ export const PLATFORMS = {
   'cr-heroku': 'https://registry.heroku.com',
   'cr-suse': 'https://registry.suse.com',
   'cr-opensuse': 'https://registry.opensuse.org',
-  'cr-gitpod': 'https://registry.gitpod.io'
+  'cr-gitpod': 'https://registry.gitpod.io',
+  
+  // Docker Hub and related registries (based on good-worker.js logic)
+  'docker-hub': 'https://registry-1.docker.io',
+  'docker': 'https://registry-1.docker.io',
+  'quay': 'https://quay.io',
+  'gcr': 'https://gcr.io',
+  'k8s-gcr': 'https://k8s.gcr.io',
+  'k8s': 'https://registry.k8s.io',
+  'ghcr': 'https://ghcr.io',
+  'cloudsmith': 'https://docker.cloudsmith.io',
+  'ecr': 'https://public.ecr.aws',
+  'docker-staging': 'https://registry-1.docker.io'
 };
 
 /**
@@ -146,23 +157,6 @@ export function transformPath(path, platformKey) {
     }
   }
 
-  // Special handling for DockerHub library images
-  if (platformKey === 'cr-dockerhub') {
-    // For DockerHub, handle library image redirection
-    // Example: /v2/nginx/manifests/latest -> /v2/library/nginx/manifests/latest
-    const pathParts = transformedPath.split('/');
-    if (pathParts.length >= 4 && pathParts[1] === 'v2') {
-      // Check if this is a library image (doesn't contain '/' in repository name)
-      const repoName = pathParts[2];
-      if (!repoName.includes('/') && repoName !== 'library') {
-        // Insert 'library' namespace for official images
-        pathParts.splice(2, 0, 'library');
-        transformedPath = pathParts.join('/');
-      }
-    }
-    return transformedPath;
-  }
-
   // Special handling for Homebrew repositories
   if (platformKey === 'homebrew') {
     // Transform paths for Homebrew Git repositories
@@ -172,6 +166,25 @@ export function transformPath(path, platformKey) {
       // /homebrew-core -> /homebrew-core
       // /homebrew-cask -> /homebrew-cask
       return transformedPath;
+    }
+  }
+
+  // Special handling for Docker Hub and related registries
+  if (platformKey === 'docker-hub' || platformKey === 'docker') {
+    // For Docker Hub, ensure /v2 prefix is maintained
+    if (transformedPath.startsWith('/')) {
+      // Docker Hub API requires /v2 prefix
+      if (!transformedPath.startsWith('/v2/')) {
+        transformedPath = `/v2${transformedPath}`;
+      }
+      
+      // Handle library image redirects for Docker Hub
+      // Example: /v2/busybox/manifests/latest -> /v2/library/busybox/manifests/latest
+      const pathParts = transformedPath.split('/');
+      if (pathParts.length === 5 && pathParts[1] === 'v2' && !pathParts[2].includes('/')) {
+        pathParts.splice(2, 0, 'library');
+        transformedPath = pathParts.join('/');
+      }
     }
   }
 
