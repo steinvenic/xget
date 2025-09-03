@@ -281,6 +281,13 @@ async function handleRequest(request, env, ctx) {
 
     const monitor = new PerformanceMonitor();
 
+    // Check for domain-based routing first (similar to good-worker.js)
+    const domainUpstream = routeByHostname(url.hostname);
+    if (domainUpstream) {
+      // This is a domain-based container registry request
+      return await handleDomainBasedRequest(request, url, domainUpstream, monitor);
+    }
+
     // Handle Docker API version check and root redirect (based on good-worker.js logic)
     if (isDocker) {
       if (url.pathname === '/' || url.pathname === '') {
@@ -833,6 +840,157 @@ function addPerformanceHeaders(response, monitor) {
     status: response.status,
     headers
   });
+}
+
+// Domain-based routing for container registries (similar to good-worker.js)
+const DOMAIN_ROUTES = {
+  // Docker Hub and related registries
+  'docker': 'https://registry-1.docker.io',
+  'docker-staging': 'https://registry-1.docker.io',
+  'quay': 'https://quay.io',
+  'gcr': 'https://gcr.io',
+  'k8s-gcr': 'https://k8s.gcr.io',
+  'k8s': 'https://registry.k8s.io',
+  'ghcr': 'https://ghcr.io',
+  'cloudsmith': 'https://docker.cloudsmith.io',
+  'ecr': 'https://public.ecr.aws',
+  // Container registry prefixes
+  'cr-quay': 'https://quay.io',
+  'cr-gcr': 'https://gcr.io',
+  'cr-mcr': 'https://mcr.microsoft.com',
+  'cr-ecr': 'https://public.ecr.aws',
+  'cr-ghcr': 'https://ghcr.io',
+  'cr-gitlab': 'https://registry.gitlab.com',
+  'cr-redhat': 'https://registry.redhat.io',
+  'cr-oracle': 'https://container-registry.oracle.com',
+  'cr-cloudsmith': 'https://docker.cloudsmith.io',
+  'cr-digitalocean': 'https://registry.digitalocean.com',
+  'cr-vmware': 'https://projects.registry.vmware.com',
+  'cr-k8s': 'https://registry.k8s.io',
+  'cr-heroku': 'https://registry.heroku.com',
+  'cr-suse': 'https://registry.suse.com',
+  'cr-opensuse': 'https://registry.opensuse.org',
+  'cr-gitpod': 'https://registry.gitpod.io'
+};
+
+/**
+ * Route by hostname for domain-based container registry access
+ * @param {string} hostname - The request hostname
+ * @returns {string} The upstream URL or empty string if no match
+ */
+function routeByHostname(hostname) {
+  // Extract subdomain (e.g., "docker" from "docker.xget.00123.fun")
+  const parts = hostname.split('.');
+  if (parts.length >= 2) {
+    const subdomain = parts[0];
+    // @ts-ignore - DOMAIN_ROUTES has string keys
+    if (subdomain in DOMAIN_ROUTES) {
+      // @ts-ignore - DOMAIN_ROUTES has string keys
+      return DOMAIN_ROUTES[subdomain];
+    }
+  }
+  return '';
+}
+
+/**
+ * Handle domain-based container registry requests (similar to good-worker.js)
+ * @param {Request} request - The incoming request
+ * @param {URL} url - Parsed URL object
+ * @param {string} upstream - The upstream registry URL
+ * @param {PerformanceMonitor} monitor - Performance monitor instance
+ * @returns {Promise<Response>} The response object
+ */
+async function handleDomainBasedRequest(request, url, upstream, monitor) {
+  const isDockerHub = upstream === 'https://registry-1.docker.io';
+  const authorization = request.headers.get('Authorization');
+
+  // Handle root redirect
+  if (url.pathname === '/' || url.pathname === '') {
+    return Response.redirect(`${url.protocol}//${url.host}/v2/`, 301);
+  }
+
+  // Handle Docker API version check
+  if (url.pathname === '/v2/' || url.pathname === '/v2') {
+    const headers = new Headers({
+      'Docker-Distribution-Api-Version': 'registry/2.0',
+      'Content-Type': 'application/json'
+    });
+    addSecurityHeaders(headers);
+    return new Response('{}', { status: 200, headers });
+  }
+
+  // Handle authentication
+  if (url.pathname === '/v2/auth') {
+    const newUrl = new URL(`${upstream}/v2/`);
+    const resp = await fetch(newUrl.toString(), {
+      method: 'GET',
+      redirect: 'follow'
+    });
+    
+    if (resp.status !== 401) {
+      return resp;
+    }
+    
+    const authenticateStr = resp.headers.get('WWW-Authenticate');
+    if (authenticateStr === null) {
+      return resp;
+    }
+    
+    const wwwAuthenticate = parseAuthenticate(authenticateStr);
+    let scope = url.searchParams.get('scope');
+
+    // autocomplete repo part into scope for DockerHub library images
+    if (scope && isDockerHub) {
+      const scopeParts = scope.split(':');
+      if (scopeParts.length === 3 && !scopeParts[1].includes('/')) {
+        scopeParts[1] = `library/${scopeParts[1]}`;
+        scope = scopeParts.join(':');
+      }
+    }
+
+    return await fetchToken(wwwAuthenticate, scope || '', authorization || '');
+  }
+
+  // Redirect for DockerHub library images
+  if (isDockerHub) {
+    const pathParts = url.pathname.split('/');
+    if (pathParts.length === 5) {
+      pathParts.splice(2, 0, 'library');
+      const redirectUrl = new URL(url);
+      redirectUrl.pathname = pathParts.join('/');
+      return Response.redirect(redirectUrl, 301);
+    }
+  }
+
+  // Forward requests
+  const newUrl = new URL(upstream + url.pathname);
+  const newReq = new Request(newUrl, {
+    method: request.method,
+    headers: request.headers,
+    redirect: isDockerHub ? 'manual' : 'follow'
+  });
+
+  const resp = await fetch(newReq);
+  
+  if (resp.status === 401) {
+    return responseUnauthorized(url);
+  }
+
+  // Handle dockerhub blob redirect manually
+  if (isDockerHub && resp.status === 307) {
+    const locationHeader = resp.headers.get('Location');
+    if (locationHeader) {
+      const location = new URL(locationHeader);
+      const redirectResp = await fetch(location.toString(), {
+        method: 'GET',
+        redirect: 'follow'
+      });
+      return redirectResp;
+    }
+  }
+
+  monitor.mark('success');
+  return resp;
 }
 
 export default {
