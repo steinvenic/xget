@@ -346,7 +346,7 @@ async function handleRequest(request, env, ctx) {
     // Handle container registry paths specially (based on good-worker.js logic)
     if (isDocker) {
       // For Docker requests, allow both /cr/ prefix and direct Docker Hub paths
-      // This allows both /cr/docker/nginx and /docker/nginx to work
+      // This allows both /cr/dockerhub/nginx and /dockerhub/nginx to work
       if (url.pathname.startsWith('/cr/')) {
         // Remove /cr prefix for container registry API consistency
         effectivePath = url.pathname.replace(/^\/cr/, '');
@@ -376,11 +376,17 @@ async function handleRequest(request, env, ctx) {
         // For direct Docker API paths, always use docker platform
         platform = 'docker';
       } else {
-        // Paths like /docker/nginx or /cr/docker/nginx
+        // Paths like /docker/nginx or /cr/dockerhub/nginx
         platform = sortedPlatforms.find(key => {
           const expectedPrefix = `/${key.replace('-', '/')}/`;
           return effectivePath.startsWith(expectedPrefix);
         }) || effectivePath.split('/')[1];
+        
+        // Special handling for container registry paths with dockerhub
+        // When we have /cr/dockerhub/..., we want to ensure platform is 'dockerhub'
+        if (url.pathname.startsWith('/cr/') && effectivePath.startsWith('/dockerhub/')) {
+          platform = 'dockerhub';
+        }
       }
     } else {
       platform =
