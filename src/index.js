@@ -321,6 +321,7 @@ async function handleRequest(request, env, ctx) {
         effectivePath = url.pathname.replace(/^\/cr/, '');
       } else if (url.pathname.startsWith('/v2/')) {
         // Direct Docker API paths like /v2/nginx/manifests/latest
+        // Keep the path as-is for direct Docker API calls
         effectivePath = url.pathname;
       } else {
         // For other Docker paths, keep as is
@@ -341,21 +342,8 @@ async function handleRequest(request, env, ctx) {
     if (isDocker) {
       if (url.pathname.startsWith('/v2/')) {
         // Direct Docker API paths like /v2/nginx/manifests/latest
-        // Extract the first path segment after /v2/ to determine the registry
-        const pathParts = url.pathname.split('/');
-        if (pathParts.length >= 3) {
-          const registryName = pathParts[2];
-                  // Map common registry names to platform keys
-        if (registryName === 'library' || config.PLATFORMS['docker'] || config.PLATFORMS['dockerhub']) {
-          platform = 'docker'; // Docker Hub library images or direct docker access
-        } else if (config.PLATFORMS[registryName]) {
-          platform = registryName; // Other registries like quay, gcr, etc.
-        } else {
-          platform = 'docker'; // Default to Docker Hub
-        }
-        } else {
-          platform = 'docker';
-        }
+        // For direct Docker API paths, always use docker platform
+        platform = 'docker';
       } else {
         // Paths like /docker/nginx or /cr/docker/nginx
         platform = sortedPlatforms.find(key => {
@@ -377,7 +365,13 @@ async function handleRequest(request, env, ctx) {
     }
 
     // Transform URL based on platform using unified logic
-    const targetPath = transformPath(effectivePath, platform);
+    // For direct Docker API paths, don't transform the path
+    let targetPath;
+    if (isDocker && url.pathname.startsWith('/v2/')) {
+      targetPath = effectivePath; // Keep the path as-is for direct Docker API calls
+    } else {
+      targetPath = transformPath(effectivePath, platform);
+    }
 
     // For container registries and Docker Hub, ensure we add the /v2 prefix for the Docker API
     let finalTargetPath;
@@ -386,7 +380,12 @@ async function handleRequest(request, env, ctx) {
       if (targetPath.startsWith('/v2')) {
         finalTargetPath = targetPath;
       } else {
-        finalTargetPath = `/v2${targetPath}`;
+        // For direct Docker API paths, don't add /v2 prefix
+        if (url.pathname.startsWith('/v2/')) {
+          finalTargetPath = targetPath;
+        } else {
+          finalTargetPath = `/v2${targetPath}`;
+        }
       }
     } else {
       finalTargetPath = targetPath;
