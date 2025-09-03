@@ -90,6 +90,7 @@ export const PLATFORMS = {
   // Docker Hub and related registries (based on good-worker.js logic)
   'docker': 'https://registry-1.docker.io',
   'docker-staging': 'https://registry-1.docker.io',
+  'dockerhub': 'https://registry-1.docker.io',
   'quay': 'https://quay.io',
   'gcr': 'https://gcr.io',
   'k8s-gcr': 'https://k8s.gcr.io',
@@ -169,7 +170,7 @@ export function transformPath(path, platformKey) {
   }
 
   // Special handling for Docker Hub and container registries (based on good-worker.js logic)
-  if (platformKey === 'docker' || platformKey === 'quay' || platformKey === 'gcr' || platformKey === 'k8s-gcr' || platformKey === 'k8s' || platformKey === 'ghcr' || platformKey === 'cloudsmith' || platformKey === 'ecr' || platformKey === 'docker-staging') {
+  if (platformKey === 'docker' || platformKey === 'dockerhub' || platformKey === 'quay' || platformKey === 'gcr' || platformKey === 'k8s-gcr' || platformKey === 'k8s' || platformKey === 'ghcr' || platformKey === 'cloudsmith' || platformKey === 'ecr' || platformKey === 'docker-staging') {
     // For Docker registries, keep the transformed path as-is
     // The /v2 prefix will be added in the main handler
     return transformedPath;
